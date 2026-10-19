@@ -1,0 +1,53 @@
+#!/bin/sh
+# Nightly database dumps for every container labelled "backup.dump=<type>".
+#   mongo     mongodump of all databases   (creds: MONGO_INITDB_ROOT_USERNAME / _PASSWORD in the container)
+#   mysql     mysqldump of MYSQL_DATABASE  (creds: MYSQL_USER / MYSQL_PASSWORD in the container)
+#   postgres  pg_dumpall                   (creds: POSTGRES_USER in the container)
+# Files: /srv/apps/<compose project>/dumps/<service>-<YYYY-MM-DD>.<ext>, the newest KEEP per service are kept.
+# Runs at 01:30 from db-dump.timer, before the PBS job (02:00) copies the VM to the backup HDD.
+set -u
+KEEP=${KEEP:-7}
+NTFY_URL=${NTFY_URL:-}
+[ -f /etc/default/deploy-sync ] && . /etc/default/deploy-sync
+HOST=$(hostname)
+DAY=$(date +%F)
+fail=0
+
+notify() { [ -n "$NTFY_URL" ] && curl -fsS -m 10 -d "$1" "$NTFY_URL" >/dev/null 2>&1; logger -t db-dump "$1"; }
+
+for c in $(docker ps --filter label=backup.dump --format '{{.Names}}'); do
+  type=$(docker inspect -f '{{index .Config.Labels "backup.dump"}}' "$c")
+  app=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$c")
+  svc=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.service"}}' "$c")
+  [ -n "$app" ] || app=$c
+  [ -n "$svc" ] || svc=$c
+  dir="/srv/apps/$app/dumps"
+  install -d -m 700 "$dir"
+  case "$type" in
+    mongo)    ext=archive.gz
+              cmd='mongodump --quiet --archive --gzip -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin' ;;
+    mysql)    ext=sql.gz
+              cmd='mysqldump -u"$MYSQL_USER" -p"$MYSQL_PASSWORD" --single-transaction --no-tablespaces --skip-lock-tables --routines --triggers "$MYSQL_DATABASE" 2>/dev/null | gzip' ;;
+    postgres) ext=sql.gz
+              cmd='pg_dumpall -U "${POSTGRES_USER:-postgres}" | gzip' ;;
+    *)        notify "db-dump on $HOST: $c has unknown backup.dump=$type"; fail=1; continue ;;
+  esac
+  out="$dir/$svc-$DAY.$ext"
+  tmp="$out.part"
+  ( umask 077; docker exec "$c" sh -c "set -o pipefail 2>/dev/null; $cmd" > "$tmp" )
+  rc=$?
+  size=$(stat -c %s "$tmp" 2>/dev/null || echo 0)
+  # an empty gzip is ~20 bytes: treat anything that small as a failed dump
+  if [ "$rc" -eq 0 ] && [ "$size" -gt 100 ] && gzip -t "$tmp" 2>/dev/null; then
+    mv "$tmp" "$out"
+    logger -t db-dump "$app/$svc ($type): $size bytes -> $out"
+  else
+    rm -f "$tmp"
+    notify "db-dump of $app/$svc ($type) on $HOST FAILED (rc=$rc, $size bytes)"
+    fail=1
+    continue
+  fi
+  # retention: keep the newest $KEEP dumps of this service
+  ls -1t "$dir"/"$svc"-*."$ext" 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -f
+done
+exit $fail

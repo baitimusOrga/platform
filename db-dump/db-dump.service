@@ -1,0 +1,8 @@
+[Unit]
+Description=Dump every database container labelled backup.dump
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/db-dump
