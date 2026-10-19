@@ -20,13 +20,16 @@ for dir in "$DEPL/$HOST"/*/; do
   app=$(basename "$dir")
   envf="/srv/apps/$app/.env"
   [ -f "$envf" ] || { mkdir -p "/srv/apps/$app" && install -m 600 /dev/null "$envf"; }
-  before=$(cd "$dir" && docker compose --env-file "$envf" -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
+  relf="/srv/apps/$app/release.env"
+  before=$(cd "$dir" && docker compose --env-file "$envf" $( [ -f "$relf" ] && echo --env-file "$relf" ) -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
   if ( cd "$dir" &&
        docker compose --env-file "$envf" -p "$app" pull -q &&
-       docker compose --env-file "$envf" -p "$app" up -d --remove-orphans --quiet-pull ) >/tmp/deploy-sync.$app.log 2>&1
+       { /usr/local/bin/deploy-release "$dir" "$envf" > "$relf.new" 2>/dev/null || true; } &&
+       mv "$relf.new" "$relf" &&
+       docker compose --env-file "$envf" --env-file "$relf" -p "$app" up -d --remove-orphans --quiet-pull ) >/tmp/deploy-sync.$app.log 2>&1
   then
-    after=$(cd "$dir" && docker compose --env-file "$envf" -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
-    [ "$before" != "$after" ] && notify "$app updated on $HOST"
+    after=$(cd "$dir" && docker compose --env-file "$envf" $( [ -f "$relf" ] && echo --env-file "$relf" ) -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
+    [ "$before" != "$after" ] && notify "$app updated on $HOST ($(grep '^APP_RELEASE=' "$relf" | cut -d= -f2))"
   else
     notify "deploy of $app on $HOST failed: $(tail -n 3 /tmp/deploy-sync.$app.log | tr '\n' ' ')"
   fi

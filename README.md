@@ -52,3 +52,15 @@ Mark the database container in its compose file, nothing else to set up:
 ```
 
 `db-dump` (timer 01:30) writes `/srv/apps/<app>/dumps/<service>-<date>.<ext>` and keeps the newest 7. The nightly PBS job (02:00) backs up the whole VM including these files. Credentials are read inside the container from its own env (`MONGO_INITDB_ROOT_*`, `MYSQL_USER`/`MYSQL_PASSWORD`/`MYSQL_DATABASE`, `POSTGRES_USER`).
+
+## Release info in the app
+
+On every run `deploy-sync` writes `/srv/apps/<app>/release.env` (via `deploy-release`) and passes it to compose as a second `--env-file`:
+
+| Variable | Value | From |
+|---|---|---|
+| `APP_RELEASE` | `v1.0.1` (highest `v*` tag on the same image), otherwise the tag in use (`staging`, `prod`) | registry |
+| `APP_REVISION` | short commit | image label `org.opencontainers.image.revision` |
+| `APP_BUILD_TIME` | build time (UTC) | image label `org.opencontainers.image.created` (set by `docker-app.yml`) |
+
+An app opts in by using them in its compose file, e.g. `APP_RELEASE: ${APP_RELEASE:-}` in `environment:`. Apps that don't reference them are unaffected.

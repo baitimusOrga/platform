@@ -38,6 +38,9 @@ jobs:
           registry: ${{ env.REG }}
           username: ${{ secrets.REGISTRY_USER }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: build metadata
+        id: meta
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - uses: docker/build-push-action@v6
         with:
           context: ${{ inputs.context }}
@@ -49,6 +52,7 @@ jobs:
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
 
   promote:
     if: github.ref_type == 'tag' || inputs.promote != ''

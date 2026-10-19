@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Print APP_RELEASE / APP_REVISION / APP_BUILD_TIME for one app, as an env file.
+
+Usage: deploy-release <compose dir> <app .env>
+Looks at the first image from our registry in the app's compose file:
+  APP_RELEASE    the highest v* tag that points at the same image as the tag in use
+                 (e.g. v1.0.1); otherwise the tag itself (staging, prod)
+  APP_REVISION   short commit from the image label org.opencontainers.image.revision
+  APP_BUILD_TIME image label org.opencontainers.image.created
+Never fails: on any error it prints what it knows, so deploys are never blocked.
+"""
+import base64, json, re, ssl, subprocess, sys, urllib.request
+
+REG = "registry.srv.home.arpa"
+CA = f"/etc/docker/certs.d/{REG}/ca.crt"
+ACCEPT = ",".join([
+    "application/vnd.oci.image.index.v1+json", "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.docker.distribution.manifest.v2+json"])
+
+def out(release, revision="", built=""):
+    print(f"APP_RELEASE={release}\nAPP_REVISION={revision}\nAPP_BUILD_TIME={built}")
+    sys.exit(0)
+
+def sh(*cmd):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout.strip()
+
+def main():
+    cdir, envf = sys.argv[1], sys.argv[2]
+    images = sh("docker", "compose", "--project-directory", cdir, "--env-file", envf, "config", "--images").split()
+    image = next((i for i in images if i.startswith(REG + "/")), None)
+    if not image:
+        out("")
+    repo, _, tag = image[len(REG) + 1:].partition(":")
+    tag = tag or "latest"
+    labels = {}
+    try:
+        labels = json.loads(sh("docker", "image", "inspect", "-f", "{{json .Config.Labels}}", image) or "{}") or {}
+    except ValueError:
+        pass
+    revision = labels.get("org.opencontainers.image.revision", "")[:12]
+    built = labels.get("org.opencontainers.image.created", "")
+    try:
+        cfg = json.load(open("/root/.docker/config.json"))
+        auth = cfg["auths"][REG]["auth"]
+        ctx = ssl.create_default_context(cafile=CA)
+        def req(path, method="GET"):
+            r = urllib.request.Request(f"https://{REG}/v2/{repo}/{path}", method=method,
+                                       headers={"Authorization": "Basic " + auth, "Accept": ACCEPT})
+            return urllib.request.urlopen(r, context=ctx, timeout=10)
+        digest = lambda t: req(f"manifests/{t}", "HEAD").headers.get("Docker-Content-Digest")
+        want = digest(tag)
+        tags = json.load(req("tags/list")).get("tags") or []
+        def key(t):
+            return [int(x) if x.isdigit() else x for x in re.split(r"[.\-]", t[1:])]
+        versions = sorted((t for t in tags if re.match(r"^v\d", t)), key=key, reverse=True)
+        for v in versions:
+            if digest(v) == want:
+                out(v, revision, built)
+    except Exception:
+        pass
+    out(tag, revision, built)
+
+main()
