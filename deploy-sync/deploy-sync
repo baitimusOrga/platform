@@ -1,0 +1,35 @@
+#!/bin/sh
+# Pull-based deploys: make every app in /srv/deployments/<host>/ match git + the registry.
+# Runs every minute from deploy-sync.timer. See README.md.
+set -u
+HOST=$(hostname)
+DEPL=/srv/deployments
+NTFY_URL=${NTFY_URL:-}
+[ -f /etc/default/deploy-sync ] && . /etc/default/deploy-sync
+
+notify() { [ -n "$NTFY_URL" ] && curl -fsS -m 10 -d "$1" "$NTFY_URL" >/dev/null 2>&1; logger -t deploy-sync "$1"; }
+
+exec 9>/run/deploy-sync.lock
+flock -n 9 || exit 0
+
+cd "$DEPL" && git pull -q --ff-only || { notify "deploy-sync on $HOST: git pull failed"; exit 1; }
+docker network inspect proxy >/dev/null 2>&1 || docker network create proxy >/dev/null
+
+for dir in "$DEPL/$HOST"/*/; do
+  [ -f "$dir/compose.yml" ] || continue
+  app=$(basename "$dir")
+  envf="/srv/apps/$app/.env"
+  [ -f "$envf" ] || { mkdir -p "/srv/apps/$app" && install -m 600 /dev/null "$envf"; }
+  before=$(cd "$dir" && docker compose --env-file "$envf" -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
+  if ( cd "$dir" &&
+       docker compose --env-file "$envf" -p "$app" pull -q &&
+       docker compose --env-file "$envf" -p "$app" up -d --remove-orphans --quiet-pull ) >/tmp/deploy-sync.$app.log 2>&1
+  then
+    after=$(cd "$dir" && docker compose --env-file "$envf" -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
+    [ "$before" != "$after" ] && notify "$app updated on $HOST"
+  else
+    notify "deploy of $app on $HOST failed: $(tail -n 3 /tmp/deploy-sync.$app.log | tr '\n' ' ')"
+  fi
+done
+docker image prune -f >/dev/null 2>&1
+exit 0

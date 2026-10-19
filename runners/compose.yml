@@ -1,0 +1,24 @@
+# GitHub Actions org runners for baitimusOrga. See docs/app-platform.md §5.
+# Each container takes one job, exits, and is restarted as a fresh runner.
+services:
+  runner:
+    image: myoung34/github-runner:2.338.0-ubuntu-noble   # bump monthly
+    restart: always
+    deploy:
+      replicas: 3                                        # parallel jobs
+    environment:
+      RUNNER_SCOPE: org
+      ORG_NAME: ${ORG_NAME}
+      APP_LOGIN: ${ORG_NAME}
+      APP_ID: ${APP_ID}
+      APP_PRIVATE_KEY: ${APP_PRIVATE_KEY}
+      EPHEMERAL: "true"
+      RANDOM_RUNNER_SUFFIX: "true"
+      RUNNER_NAME_PREFIX: ci-runner-01
+      LABELS: self-hosted,homelab
+      RUNNER_GROUP: Default
+    volumes:
+      # Jobs build with the VM's Docker: a job is root on this VM (the VM is the boundary).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/docker/certs.d:/etc/docker/certs.d:ro
+      - /usr/local/share/ca-certificates/homelab-internal-ca.crt:/etc/ssl/certs/homelab-internal-ca.pem:ro   # Go tools (buildx imagetools) trust it

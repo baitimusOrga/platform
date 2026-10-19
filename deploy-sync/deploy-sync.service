@@ -1,0 +1,8 @@
+[Unit]
+Description=Sync apps with the deployments repo and the registry
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/deploy-sync

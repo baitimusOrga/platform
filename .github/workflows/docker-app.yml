@@ -1,0 +1,73 @@
+# Reusable pipeline for every app in baitimusOrga. See README.md.
+#   push to main      -> build, push :sha-<commit> and :staging
+#   tag v*            -> re-tag the already built :sha-<commit> as :prod and :<tag> (no rebuild)
+#   manual (promote)  -> re-tag any existing tag as :prod (rollback)
+name: docker-app
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: image name in the registry, e.g. "myapp"
+        type: string
+        required: true
+      context:
+        description: build context
+        type: string
+        default: "."
+      dockerfile:
+        description: Dockerfile path (relative to the repo root)
+        type: string
+        default: "Dockerfile"
+      promote:
+        description: existing tag to put on :prod (rollback), e.g. "v1.2.0" or "sha-<commit>"
+        type: string
+        default: ""
+
+env:
+  REG: registry.srv.home.arpa
+
+jobs:
+  build:
+    if: github.ref_type == 'branch' && inputs.promote == ''
+    runs-on: [self-hosted, homelab]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REG }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.REG }}/${{ inputs.image }}:sha-${{ github.sha }}
+            ${{ env.REG }}/${{ inputs.image }}:staging
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  promote:
+    if: github.ref_type == 'tag' || inputs.promote != ''
+    runs-on: [self-hosted, homelab]
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REG }}
+          username: ${{ secrets.REGISTRY_USER }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: re-tag without rebuilding
+        env:
+          IMAGE: ${{ env.REG }}/${{ inputs.image }}
+          SRC: ${{ inputs.promote != '' && inputs.promote || format('sha-{0}', github.sha) }}
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          set -eu
+          extra=""
+          [ -n "$VERSION" ] && extra="-t $IMAGE:$VERSION"
+          # fails loudly if SRC was never built: only images that went through staging reach prod
+          docker buildx imagetools create -t "$IMAGE:prod" $extra "$IMAGE:$SRC"
+          echo "### $IMAGE:prod <- $SRC" >> "$GITHUB_STEP_SUMMARY"
