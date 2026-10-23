@@ -1,0 +1,110 @@
+# Reusable: turn an app repo's prefixed secrets + variables into the host's .env. See README.md.
+#   STAGING_FOO (secret or variable) -> FOO=... in apps-staging/<app>/.env.age
+#   PROD_FOO                         -> FOO=... in apps-prod/<app>/.env.age
+# The file is encrypted to the host's age key (deployments/apps-<env>/.age-recipients) and committed
+# to the deployments repo; deploy-sync on the host decrypts it into /srv/apps/<app>/.env.
+# Nothing is committed when neither the values nor the recipients changed.
+name: env-sync
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: folder name in deployments (apps-<env>/<app>/)
+        type: string
+        required: true
+      environment:
+        description: staging or prod
+        type: string
+        required: true
+
+jobs:
+  sync:
+    runs-on: [self-hosted, homelab]
+    steps:
+      - name: check inputs
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          APP: ${{ inputs.app }}
+        run: |
+          case "$ENVIRONMENT" in staging|prod) ;; *) echo "::error::environment must be staging or prod"; exit 1;; esac
+          case "$APP" in ''|*[!a-z0-9-]*) echo "::error::app must be [a-z0-9-]+"; exit 1;; esac
+
+      - uses: actions/checkout@v4
+        with:
+          repository: baitimusOrga/deployments
+          ssh-key: ${{ secrets.DEPLOYMENTS_DEPLOY_KEY }}
+          path: deployments
+
+      - name: install age
+        run: command -v age >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq age >/dev/null; }
+
+      - name: write .env
+        env:
+          SECRETS: ${{ toJSON(secrets) }}
+          VARS: ${{ toJSON(vars) }}
+          PREFIX: ${{ inputs.environment == 'prod' && 'PROD_' || 'STAGING_' }}
+          OUT: ${{ runner.temp }}/app.env
+        run: |
+          umask 077
+          python3 - <<'EOF'
+          import json, os, sys
+          prefix, out = os.environ["PREFIX"], os.environ["OUT"]
+          entries, errors = {}, []
+          for kind in ("SECRETS", "VARS"):
+              for name, value in json.loads(os.environ[kind] or "{}").items():
+                  if not name.startswith(prefix) or name == prefix:
+                      continue
+                  key = name[len(prefix):]
+                  if key in entries:
+                      errors.append(f"{name} is set as secret and variable")
+                  elif "\n" in value or "'" in value:
+                      errors.append(f"{name}: newlines and single quotes are not allowed")
+                  entries[key] = value
+          if not entries:
+              errors.append(f"no {prefix}* secrets or variables in this repo")
+          for e in errors:
+              print(f"::error::{e}")
+          if errors:
+              sys.exit(1)
+          with open(out, "w") as f:
+              for key in sorted(entries):
+                  f.write(f"{key}='{entries[key]}'\n")
+          print(f"{len(entries)} keys: " + ", ".join(sorted(entries)))
+          EOF
+
+      - name: encrypt and commit
+        env:
+          APP: ${{ inputs.app }}
+          HOSTDIR: apps-${{ inputs.environment }}
+          PLAIN: ${{ runner.temp }}/app.env
+          SOURCE: ${{ github.repository }}@${{ github.sha }}
+        working-directory: deployments
+        run: |
+          set -eu
+          dir="$HOSTDIR/$APP"
+          rcp="$HOSTDIR/.age-recipients"
+          [ -d "$dir" ] || { echo "::error::$dir does not exist in deployments: add the app's compose folder first"; exit 1; }
+          [ -s "$rcp" ] || { echo "::error::$rcp missing"; exit 1; }
+          # fingerprint of recipients + plaintext; age output differs on every run, so compare this instead
+          sum=$(cat "$rcp" "$PLAIN" | sha256sum | cut -c1-64)
+          if [ "$(cat "$dir/.env.sha256" 2>/dev/null)" = "$sum" ]; then
+            echo "### $dir/.env unchanged" >> "$GITHUB_STEP_SUMMARY"; shred -u "$PLAIN"; exit 0
+          fi
+          age -R "$rcp" -a -o "$dir/.env.age" "$PLAIN"
+          shred -u "$PLAIN"
+          echo "$sum" > "$dir/.env.sha256"
+          git config user.name "env-sync"
+          git config user.email "env-sync@users.noreply.github.com"
+          git add "$dir/.env.age" "$dir/.env.sha256"
+          git commit -q -m "$APP ($HOSTDIR): .env from $SOURCE"
+          for i in 1 2 3 4 5; do
+            git push -q origin HEAD:main && break
+            [ "$i" = 5 ] && { echo "::error::push to deployments failed"; exit 1; }
+            sleep $((i * 3)); git pull -q --rebase origin main
+          done
+          echo "### $dir/.env.age updated, live on the host within a minute" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: clean up
+        if: always()
+        run: rm -f "${{ runner.temp }}/app.env"

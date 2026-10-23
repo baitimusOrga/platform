@@ -5,6 +5,7 @@ set -u
 HOST=$(hostname)
 DEPL=/srv/deployments
 NTFY_URL=${NTFY_URL:-}
+AGE_KEY=/etc/deploy-sync/age.key          # this host's age identity (install.sh creates it)
 [ -f /etc/default/deploy-sync ] && . /etc/default/deploy-sync
 
 notify() { [ -n "$NTFY_URL" ] && curl -fsS -m 10 -d "$1" "$NTFY_URL" >/dev/null 2>&1; logger -t deploy-sync "$1"; }
@@ -20,6 +21,20 @@ for dir in "$DEPL/$HOST"/*/; do
   app=$(basename "$dir")
   envf="/srv/apps/$app/.env"
   [ -f "$envf" ] || { mkdir -p "/srv/apps/$app" && install -m 600 /dev/null "$envf"; }
+  # Secrets from git (env-sync.yml): <host>/<app>/.env.age, encrypted to this host's key.
+  # When present it owns the .env; a broken file keeps the last good .env and notifies once.
+  if [ -f "$dir/.env.age" ]; then
+    mark="/srv/apps/$app/.env.age.failed"
+    if ( umask 077 && age -d -i "$AGE_KEY" -o "$envf.new" "$dir/.env.age" ) 2>/dev/null; then
+      rm -f "$mark"
+      if cmp -s "$envf.new" "$envf"; then rm -f "$envf.new"
+      else mv "$envf.new" "$envf" && notify "$app: .env updated on $HOST"; fi
+    else
+      rm -f "$envf.new"
+      sum=$(sha256sum "$dir/.env.age" | cut -c1-64)
+      [ "$(cat "$mark" 2>/dev/null)" = "$sum" ] || { echo "$sum" > "$mark"; notify "$app on $HOST: .env.age does not decrypt with $AGE_KEY, keeping the old .env"; }
+    fi
+  fi
   relf="/srv/apps/$app/release.env"
   before=$(cd "$dir" && docker compose --env-file "$envf" $( [ -f "$relf" ] && echo --env-file "$relf" ) -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
   if ( cd "$dir" &&
