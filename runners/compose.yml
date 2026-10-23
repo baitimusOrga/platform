@@ -2,7 +2,8 @@
 # Each container takes one job, exits, and is restarted as a fresh runner.
 services:
   runner:
-    image: myoung34/github-runner:2.338.0-ubuntu-noble   # bump monthly
+    build: .                                             # base image + pnpm, bump the base monthly
+    image: ci-runner:local
     restart: always
     deploy:
       replicas: 3                                        # parallel jobs
@@ -22,3 +23,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/docker/certs.d:/etc/docker/certs.d:ro
       - /usr/local/share/ca-certificates/homelab-internal-ca.crt:/etc/ssl/certs/homelab-internal-ca.pem:ro   # Go tools (buildx imagetools) trust it
+      # Shared by all runners and kept across jobs, so jobs need no actions/cache (its upload costs
+      # 6-8 s per job): setup-node/setup-java downloads, the pnpm store, the Maven repository.
+      - toolcache:/opt/hostedtoolcache
+      - pnpm:/root/.local/share/pnpm
+      - m2:/root/.m2
+
+volumes:
+  toolcache:
+  pnpm:
+  m2:
