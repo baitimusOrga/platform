@@ -6,7 +6,7 @@ services:
     image: ci-runner:local
     restart: always
     deploy:
-      replicas: 3                                        # parallel jobs
+      replicas: 6                                        # parallel jobs; each needs ~1.5 GB RAM, 1 vCPU
     environment:
       RUNNER_SCOPE: org
       ORG_NAME: ${ORG_NAME}
