@@ -61,7 +61,7 @@ and add a job to its `deploy.yml`:
 2. The file is encrypted with [age](https://age-encryption.org) to the host's public key in `deployments/apps-<env>/.age-recipients` and committed as `apps-<env>/<app>/.env.age` (+ `.env.sha256`, a fingerprint so unchanged values don't produce a commit).
 3. `deploy-sync` decrypts it with `/etc/deploy-sync/age.key` into `/srv/apps/<app>/.env` (mode 600). Compose recreates the containers whose environment changed. A file that doesn't decrypt keeps the last good `.env` and sends one ntfy message.
 
-Needs the repo secret `DEPLOYMENTS_DEPLOY_KEY`: the private half of the **write** deploy key `env-sync` on `deployments`. Once an app has `.env.age`, its host `.env` is owned by GitHub: manual edits there are overwritten on the next change.
+Needs the repo secret `DEPLOYMENTS_DEPLOY_KEY`: the private half of a **write** deploy key on `deployments`, one per app (`env-sync: <app>`), so each can be revoked alone. Once an app has `.env.age`, its host `.env` is owned by GitHub: manual edits there are overwritten on the next change.
 
 GitHub doesn't run a workflow when a secret changes. After `gh secret set`, run the app's deploy workflow by hand with `sync` = `staging` or `prod` (or push / tag).
 
