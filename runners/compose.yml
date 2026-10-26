@@ -6,7 +6,7 @@ services:
     image: ci-runner:local
     restart: always
     deploy:
-      replicas: 6                                        # parallel jobs; each needs ~1.5 GB RAM, 1 vCPU
+      replicas: 3                                        # parallel jobs; 6 were idle 99% of the time (2026-10-23..26)
     environment:
       RUNNER_SCOPE: org
       ORG_NAME: ${ORG_NAME}
@@ -16,6 +16,9 @@ services:
       EPHEMERAL: "true"
       RANDOM_RUNNER_SUFFIX: "true"
       RUNNER_NAME_PREFIX: ci-runner-01
+      # One fixed work folder per container. The default /_work/<random runner name> leaves a new
+      # checkout behind after every job, because Docker restarts the container instead of recreating it.
+      RUNNER_WORKDIR: /_work/job
       LABELS: self-hosted,homelab
       RUNNER_GROUP: Default
     volumes:
