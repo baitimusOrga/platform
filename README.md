@@ -37,6 +37,8 @@ The repo needs the secrets `REGISTRY_USER` and `REGISTRY_PASSWORD` (per repo: or
 - `git tag v1.0.0 && git push --tags` → the same image becomes `:prod` + `:v1.0.0` → `apps-prod` runs it within a minute
 - rollback: *Actions → deploy → Run workflow*, promote = `v0.9.0`
 
+After `up -d`, `deploy-sync` waits up to 90 s (`HEALTH_WAIT`) for every container of the app to be `running` and, where it has a healthcheck, `healthy`. Traefik drops unhealthy containers from routing, so without this a bad release would mean a silent 404. A container that stays bad sends one ntfy message naming it and the previous release (the rollback value); recovery sends one more. Alerts go to `NTFY_URL` from `/etc/default/deploy-sync` (mode 600), shared with `db-dump`.
+
 ## Secrets from GitHub (env-sync)
 
 Instead of editing `/srv/apps/<app>/.env` on each host by hand, an app can keep its settings as repo secrets and variables with an environment prefix:

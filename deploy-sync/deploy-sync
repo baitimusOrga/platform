@@ -6,9 +6,35 @@ HOST=$(hostname)
 DEPL=/srv/deployments
 NTFY_URL=${NTFY_URL:-}
 AGE_KEY=/etc/deploy-sync/age.key          # this host's age identity (install.sh creates it)
+HEALTH_WAIT=${HEALTH_WAIT:-90}            # seconds to wait for healthchecks after up -d
 [ -f /etc/default/deploy-sync ] && . /etc/default/deploy-sync
 
 notify() { [ -n "$NTFY_URL" ] && curl -fsS -m 10 -d "$1" "$NTFY_URL" >/dev/null 2>&1; logger -t deploy-sync "$1"; }
+
+# Traefik only routes to containers whose healthcheck is "healthy", so a container that comes up
+# unhealthy means a 404 for visitors while compose considers the deploy done. Wait for every
+# container of the app; notify once when something stays bad, once more when it recovers.
+check_health() {
+  dir=$1; app=$2; envf=$3; relf=$4; prev=$5
+  mark="/srv/apps/$app/.unhealthy"
+  waited=0
+  while :; do
+    bad=$(cd "$dir" && docker compose --env-file "$envf" --env-file "$relf" -p "$app" ps -aq 2>/dev/null |
+          xargs -r docker inspect -f '{{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}-{{end}}' 2>/dev/null |
+          awk '$2 != "running" || $3 == "unhealthy" || $3 == "starting" { print substr($1, 2) " " $2 "/" $3 }' | tr '\n' ' ')
+    [ -z "$bad" ] && break
+    [ "$waited" -ge "$HEALTH_WAIT" ] && break
+    sleep 5; waited=$((waited + 5))
+  done
+  if [ -n "$bad" ]; then
+    [ "$(cat "$mark" 2>/dev/null)" = "$bad" ] && return
+    printf '%s' "$bad" > "$mark"
+    notify "$app on $HOST unhealthy after deploy: $bad(previous release ${prev:-unknown}; rollback: deploy workflow with promote=${prev:-<tag>}, or pin it in deployments)"
+  elif [ -f "$mark" ]; then
+    rm -f "$mark"
+    notify "$app on $HOST healthy again"
+  fi
+}
 
 exec 9>/run/deploy-sync.lock
 flock -n 9 || exit 0
@@ -36,6 +62,7 @@ for dir in "$DEPL/$HOST"/*/; do
     fi
   fi
   relf="/srv/apps/$app/release.env"
+  prev_release=$(grep '^APP_RELEASE=' "$relf" 2>/dev/null | cut -d= -f2)
   before=$(cd "$dir" && docker compose --env-file "$envf" $( [ -f "$relf" ] && echo --env-file "$relf" ) -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
   if ( cd "$dir" &&
        docker compose --env-file "$envf" -p "$app" pull -q &&
@@ -45,6 +72,7 @@ for dir in "$DEPL/$HOST"/*/; do
   then
     after=$(cd "$dir" && docker compose --env-file "$envf" $( [ -f "$relf" ] && echo --env-file "$relf" ) -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
     [ "$before" != "$after" ] && notify "$app updated on $HOST ($(grep '^APP_RELEASE=' "$relf" | cut -d= -f2))"
+    check_health "$dir" "$app" "$envf" "$relf" "$prev_release"
   else
     notify "deploy of $app on $HOST failed: $(tail -n 3 /tmp/deploy-sync.$app.log | tr '\n' ' ')"
   fi
