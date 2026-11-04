@@ -7,9 +7,31 @@ DEPL=/srv/deployments
 NTFY_URL=${NTFY_URL:-}
 AGE_KEY=/etc/deploy-sync/age.key          # this host's age identity (install.sh creates it)
 HEALTH_WAIT=${HEALTH_WAIT:-90}            # seconds to wait for healthchecks after up -d
+REMIND_MIN=${REMIND_MIN:-1440}            # repeat an ongoing failure alert this often (minutes)
+STATE=/var/lib/deploy-sync                # failure markers, survive reboots
 [ -f /etc/default/deploy-sync ] && . /etc/default/deploy-sync
 
 notify() { [ -n "$NTFY_URL" ] && curl -fsS -m 10 -d "$1" "$NTFY_URL" >/dev/null 2>&1; logger -t deploy-sync "$1"; }
+
+# Failures that repeat every minute (GitHub down, registry down) must not page every minute:
+# notify on the first failure, remind every REMIND_MIN while it lasts, and once on recovery.
+# fail <key> <message>  /  ok <key> <what recovered>
+fail() {
+  m="$STATE/$1.failed"
+  if [ ! -f "$m" ]; then
+    date +%s > "$m"; notify "$2"
+  elif [ -n "$(find "$m" -mmin +"$REMIND_MIN" 2>/dev/null)" ]; then
+    touch "$m"; notify "still failing since $(date -d "@$(cat "$m")" '+%d.%m. %H:%M'): $2"
+  else
+    logger -t deploy-sync "$2"
+  fi
+}
+ok() {
+  m="$STATE/$1.failed"
+  [ -f "$m" ] || return 0
+  mins=$(( ($(date +%s) - $(cat "$m" 2>/dev/null || date +%s)) / 60 ))
+  rm -f "$m"; notify "$2 on $HOST works again (was failing for ${mins} min)"
+}
 
 # Traefik only routes to containers whose healthcheck is "healthy", so a container that comes up
 # unhealthy means a 404 for visitors while compose considers the deploy done. Wait for every
@@ -39,7 +61,12 @@ check_health() {
 exec 9>/run/deploy-sync.lock
 flock -n 9 || exit 0
 
-cd "$DEPL" && git pull -q --ff-only || { notify "deploy-sync on $HOST: git pull failed"; exit 1; }
+mkdir -p "$STATE"
+if ! err=$(cd "$DEPL" && git pull -q --ff-only 2>&1); then
+  fail git-pull "deploy-sync on $HOST: git pull failed: $(printf '%s' "$err" | head -n 1)"
+  exit 1
+fi
+ok git-pull "git pull"
 docker network inspect proxy >/dev/null 2>&1 || docker network create proxy >/dev/null
 
 for dir in "$DEPL/$HOST"/*/; do
@@ -72,9 +99,10 @@ for dir in "$DEPL/$HOST"/*/; do
   then
     after=$(cd "$dir" && docker compose --env-file "$envf" $( [ -f "$relf" ] && echo --env-file "$relf" ) -p "$app" images -q 2>/dev/null | sort | tr '\n' ' ')
     [ "$before" != "$after" ] && notify "$app updated on $HOST ($(grep '^APP_RELEASE=' "$relf" | cut -d= -f2))"
+    ok "deploy-$app" "deploy of $app"
     check_health "$dir" "$app" "$envf" "$relf" "$prev_release"
   else
-    notify "deploy of $app on $HOST failed: $(tail -n 3 /tmp/deploy-sync.$app.log | tr '\n' ' ')"
+    fail "deploy-$app" "deploy of $app on $HOST failed: $(tail -n 3 /tmp/deploy-sync.$app.log | tr '\n' ' ')"
   fi
 done
 docker image prune -f >/dev/null 2>&1

@@ -39,6 +39,8 @@ The repo needs the secrets `REGISTRY_USER` and `REGISTRY_PASSWORD` (per repo: or
 
 After `up -d`, `deploy-sync` waits up to 90 s (`HEALTH_WAIT`) for every container of the app to be `running` and, where it has a healthcheck, `healthy`. Traefik drops unhealthy containers from routing, so without this a bad release would mean a silent 404. A container that stays bad sends one ntfy message naming it and the previous release (the rollback value); recovery sends one more. Alerts go to `NTFY_URL` from `/etc/default/deploy-sync` (mode 600), shared with `db-dump`.
 
+A failing `git pull` or deploy (GitHub or registry down, revoked deploy key) alerts **once**, not every minute: the first failure notifies, an ongoing one repeats every `REMIND_MIN` minutes (default 1440 = daily), and recovery sends one "works again" message with the outage length. Markers are `/var/lib/deploy-sync/<git-pull|deploy-app>.failed`; every run still logs to the journal (`journalctl -t deploy-sync`).
+
 ## Secrets from GitHub (env-sync)
 
 Instead of editing `/srv/apps/<app>/.env` on each host by hand, an app can keep its settings as repo secrets and variables with an environment prefix:
